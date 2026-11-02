@@ -194,8 +194,7 @@ Do not request payment information.
 
 @st.cache_resource
 def get_ai_client():
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-
+api_key = (os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")).strip()
     if not api_key:
         return None
 
@@ -516,7 +515,7 @@ if "approved_plan" not in st.session_state:
 st.markdown("""
 <div class="hero">
     <h1>✈️ VOYARA AI</h1>
-    <p>You Dream It. We Plan It. You Approve It.</p>
+    <p>You Dream It. We Plan It. You Approve It. We Book It..</p>
     <p>Your intelligent personal travel concierge.</p>
 </div>
 """, unsafe_allow_html=True)
