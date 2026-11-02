@@ -194,7 +194,7 @@ Do not request payment information.
 
 @st.cache_resource
 def get_ai_client():
-api_key = (os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")).strip()
+    api_key = (os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")).strip()
     if not api_key:
         return None
 
