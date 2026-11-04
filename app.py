@@ -236,9 +236,11 @@ def get_ai_client():
         return None
 
 
-def ask_ai(prompt, assistant, max_tokens=1600):
-    client = get_ai_client()
 
+def ask_ai(prompt, assistant, max_tokens=1600):
+    import time
+
+    client = get_ai_client()
     if client is None:
         return None, None
 
@@ -247,30 +249,49 @@ def ask_ai(prompt, assistant, max_tokens=1600):
     except ImportError:
         return None, None
 
-    for model in MODELS:
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=assistant.instructions(),
-                    temperature=0.65,
-                    max_output_tokens=max_tokens,
-                ),
-            )
+    models_to_try = list(dict.fromkeys(
+        MODELS + ["gemini-2.5-flash"]
+    ))
 
-            answer = (response.text or "").strip()
+    for model in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=assistant.instructions(),
+                        temperature=0.65,
+                        max_output_tokens=max_tokens,
+                    ),
+                )
 
-            if answer:
-                return answer, model
+                answer = (response.text or "").strip()
 
-        except Exception as error:
-            print(
-                f"VOYARA AI ERROR [{model}]: {error}",
-                flush=True,
-            )
+                if answer:
+                    return answer, model
+
+            except Exception as error:
+                print(
+                    f"VOYARA AI ERROR [{model}] "
+                    f"attempt {attempt + 1}: {error}",
+                    flush=True,
+                )
+
+                error_text = str(error).lower()
+                temporary_error = any(
+                    code in error_text
+                    for code in ["504", "503", "500", "429", "timeout"]
+                )
+
+                if not temporary_error:
+                    break
+
+                if attempt == 0:
+                    time.sleep(2)
 
     return None, None
+
 
 
 # ==========================================
