@@ -19,7 +19,10 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "voyara.db"
 
+
 MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
 ]
 
@@ -237,9 +240,8 @@ def get_ai_client():
 
 
 
-def ask_ai(prompt, assistant, max_tokens=1600):
-    import time
 
+def ask_ai(prompt, assistant, max_tokens=1600):
     client = get_ai_client()
     if client is None:
         return None, None
@@ -249,48 +251,28 @@ def ask_ai(prompt, assistant, max_tokens=1600):
     except ImportError:
         return None, None
 
-    models_to_try = list(dict.fromkeys(
-        MODELS + ["gemini-2.5-flash"]
-    ))
+    for model in ["gemini-3.6-flash", "gemini-3.5-flash-lite"]:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=assistant.instructions(),
+                    temperature=0.65,
+                    max_output_tokens=max_tokens,
+                ),
+            )
 
-    for model in models_to_try:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=assistant.instructions(),
-                        temperature=0.65,
-                        max_output_tokens=max_tokens,
-                    ),
-                )
+            answer = (response.text or "").strip()
 
-                answer = (response.text or "").strip()
+            if answer:
+                return answer, model
 
-                if answer:
-                    return answer, model
-
-            except Exception as error:
-                print(
-                    f"VOYARA AI ERROR [{model}] "
-                    f"attempt {attempt + 1}: {error}",
-                    flush=True,
-                )
-
-                error_text = str(error).lower()
-                temporary_error = any(
-                    code in error_text
-                    for code in ["504", "503", "500", "429", "timeout"]
-                )
-
-                if not temporary_error:
-                    break
-
-                if attempt == 0:
-                    time.sleep(2)
+        except Exception as error:
+            print(f"VOYARA AI ERROR [{model}]: {error}", flush=True)
 
     return None, None
+
 
 
 
