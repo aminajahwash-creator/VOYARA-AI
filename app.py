@@ -20,11 +20,12 @@ ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "voyara.db"
 
 
+
 MODELS = [
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
+    "claude-sonnet-4-6",
 ]
+
+
 
 st.set_page_config(
     page_title="VOYARA AI | Travel Concierge",
@@ -220,23 +221,25 @@ Do not request payment information.
 # GEMINI AI CONNECTION WITH BACKUP
 # ==========================================
 
+
 @st.cache_resource
 def get_ai_client():
-    api_key = (os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")).strip()
+    api_key = (
+        os.getenv("ANTHROPIC_API_KEY")
+        or st.secrets.get("ANTHROPIC_API_KEY", "")
+    )
     if not api_key:
         return None
 
     try:
-        from google import genai
-
-        return genai.Client(
-            api_key=api_key,
-            http_options={"timeout": 20000},
-        )
-
+        from anthropic import Anthropic
+        return Anthropic(api_key=api_key, timeout=60.0, max_retries=0)
     except Exception as error:
-        print("VOYARA CLIENT ERROR:", error, flush=True)
+        print("VOYARA CLAUDE CLIENT ERROR:", error, flush=True)
         return None
+
+
+
 
 
 
@@ -244,34 +247,38 @@ def get_ai_client():
 def ask_ai(prompt, assistant, max_tokens=1600):
     client = get_ai_client()
     if client is None:
+        print("VOYARA CLAUDE ERROR: API client unavailable.", flush=True)
         return None, None
+
+    model = MODELS[0]
 
     try:
-        from google.genai import types
-    except ImportError:
-        return None, None
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=assistant.instructions(),
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+        )
 
-    for model in ["gemini-3.6-flash", "gemini-3.5-flash-lite"]:
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=assistant.instructions(),
-                    temperature=0.65,
-                    max_output_tokens=max_tokens,
-                ),
-            )
+        answer = "\n".join(
+            block.text
+            for block in response.content
+            if block.type == "text"
+        ).strip()
 
-            answer = (response.text or "").strip()
+        if answer:
+            return answer, model
 
-            if answer:
-                return answer, model
+        print("VOYARA CLAUDE ERROR: Empty response.", flush=True)
 
-        except Exception as error:
-            print(f"VOYARA AI ERROR [{model}]: {error}", flush=True)
+    except Exception as error:
+        print("VOYARA CLAUDE ERROR:", error, flush=True)
 
     return None, None
+
+
 
 
 
@@ -857,15 +864,17 @@ with tab_plan:
                 st.session_state.plan = answer
                 st.session_state.last_model = model
 
+            
             else:
-                st.session_state.plan = fallback_plan(trip)
+                st.session_state.plan = None
                 st.session_state.last_model = None
 
-                st.info(
-                    "AI planning is temporarily unavailable. "
-                    "Your travel framework is ready, and you "
-                    "can regenerate it later."
+                st.warning(
+                    "Claude could not generate your itinerary. Your trip details are saved. Please try again. "
+                    "Your trip details are saved. "
+                    "Please try generating your itinerary again."
                 )
+  
 
     if st.session_state.trip and st.session_state.plan:
 
