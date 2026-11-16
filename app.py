@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 from datetime import date, timedelta
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode, quote_plus
 
 import streamlit as st
@@ -268,6 +269,8 @@ def ask_ai(prompt, assistant, max_tokens=1600):
             if block.type == "text"
         ).strip()
 
+        if answer and response.stop_reason == "max_tokens":
+            print("VOYARA WARNING: AI response reached output token limit.", flush=True)
         if answer:
             return answer, model
 
@@ -579,6 +582,67 @@ def day_sections(plan):
     return days, intro
 
 
+def complete_itinerary(answer, trip):
+    """Only accept an itinerary containing a heading for every travel day."""
+    if not answer:
+        return False
+    total_days = (date.fromisoformat(trip["return"]) - date.fromisoformat(trip["departure"])).days + 1
+    headings = {int(n) for n in re.findall(r"(?im)^\s*(?:#{1,4}\s*|\*\*)?Day\s+(\d+)\b", answer)}
+    return all(n in headings for n in range(1, total_days + 1))
+
+
+def create_itinerary(trip):
+    """Generate short day batches concurrently instead of one huge slow answer."""
+    total_days = (date.fromisoformat(trip["return"]) - date.fromisoformat(trip["departure"])).days + 1
+    departure = date.fromisoformat(trip["departure"])
+    batches = [list(range(start, min(start + 2, total_days + 1)))
+               for start in range(1, total_days + 1, 2)]
+
+    def generate_batch(numbers):
+        dates = ", ".join(f"Day {n} ({(departure + timedelta(days=n-1)).isoformat()})" for n in numbers)
+        prompt = (
+            f"Write ONLY these itinerary days: {dates}. "
+            "Do NOT write any other days. Start each with an exact Markdown heading "
+            "'## Day N — Title'. For EACH day give morning, afternoon, evening, "
+            "named destination-specific activities, transport, and estimated daily spending. "
+            "Aim for 100-140 words per day. Keep recommendations practical and "
+            "respect the traveler preferences. Label all prices as estimates; "
+            "do not claim live prices or bookings.\n\n" + trip_summary(trip)
+        )
+        answer, model = ask_ai(prompt, PlanningAssistant(), max_tokens=1400)
+        found = {}
+        if answer:
+            sections, _ = day_sections(answer)
+            for heading, content in sections:
+                match = re.match(r"Day\s+(\d+)\b", heading, re.I)
+                if match and int(match.group(1)) in numbers:
+                    found[int(match.group(1))] = content
+        return found, model
+
+    collected = {}
+    model_used = None
+    # Independent batches run together, reducing waiting compared with sequential calls.
+    with ThreadPoolExecutor(max_workers=min(3, len(batches))) as pool:
+        futures = [pool.submit(generate_batch, batch) for batch in batches]
+        for future in as_completed(futures):
+            try:
+                sections, model = future.result()
+                collected.update(sections)
+                if model:
+                    model_used = model
+            except Exception as error:
+                print("VOYARA DAY BATCH ERROR:", error, flush=True)
+
+    # Preserve any successful days rather than discarding the whole response.
+    if not collected:
+        return None, None
+    intro = (f"## Your {trip['destination']} Adventure\n\n"
+             "A personalized day-by-day travel proposal. All costs are estimates, "
+             "and flights, hotels and entry requirements must be verified.\n\n")
+    combined = intro + "\n\n".join(collected[n] for n in sorted(collected))
+    return combined, model_used
+
+
 # ==========================================
 # SESSION STATE
 # ==========================================
@@ -845,36 +909,24 @@ with tab_plan:
             st.session_state.approved_plan = False
             st.session_state.readiness = {}
 
-            prompt = (
-                "Create a detailed personalized travel plan.\n\n"
-                + trip_summary(trip)
-            )
+            with st.spinner("VOYARA is preparing every day of your trip..."):
+                answer, model = create_itinerary(trip)
 
-            with st.spinner(
-                "VOYARA is preparing your personalized trip..."
-            ):
+            st.session_state.plan = answer or None
+            st.session_state.last_model = model
+            if not complete_itinerary(answer, trip):
+                st.warning("Some days could not be generated. You can retry without re-entering your trip.")
 
-                answer, model = ask_ai(
-                    prompt,
-                    PlanningAssistant(),
-                    max_tokens=2300,
-                )
-
+    if st.session_state.trip and not st.session_state.plan:
+        if st.button("🔄 Retry complete itinerary (keep my trip details)", type="primary"):
+            with st.spinner("VOYARA is preparing every day of your trip..."):
+                answer, model = create_itinerary(st.session_state.trip)
             if answer:
                 st.session_state.plan = answer
                 st.session_state.last_model = model
-
-            
+                st.rerun()
             else:
-                st.session_state.plan = None
-                st.session_state.last_model = None
-
-                st.warning(
-                    "Claude could not generate your itinerary. Your trip details are saved. Please try again. "
-                    "Your trip details are saved. "
-                    "Please try generating your itinerary again."
-                )
-  
+                st.warning("Claude is unavailable right now. Your trip details are safe.")
 
     if st.session_state.trip and st.session_state.plan:
 
@@ -917,6 +969,22 @@ with tab_plan:
 
         st.markdown("""<div class="voyara-bubble"><span class="voyara-step">Your trip is taking shape</span><br><strong>I've put together your first adventure!</strong> Think of this as our starting point, not a homework assignment. Explore the days below, then tell me what you love (or what makes you say <em>absolutely not</em> 😂).</div>""", unsafe_allow_html=True)
         st.markdown("### 📅 Your itinerary")
+        if not complete_itinerary(st.session_state.plan, trip):
+            st.warning("A few travel days are missing. You can regenerate without re-entering your details.")
+            if st.button("🔄 Retry missing itinerary days", key="retry_partial_days"):
+                with st.spinner("Completing your itinerary..."):
+                    new_plan, new_model = create_itinerary(trip)
+                if new_plan:
+                    old_days, _ = day_sections(st.session_state.plan)
+                    new_days, _ = day_sections(new_plan)
+                    merged = {}
+                    for heading, content in old_days + new_days:
+                        match = re.match(r"Day\s+(\d+)\b", heading, re.I)
+                        if match:
+                            merged[int(match.group(1))] = content
+                    st.session_state.plan = "## Your travel itinerary\n\n" + "\n\n".join(merged[n] for n in sorted(merged))
+                    st.session_state.last_model = new_model
+                    st.rerun()
         days, intro = day_sections(st.session_state.plan)
         if days:
             if intro:
@@ -971,9 +1039,9 @@ with tab_plan:
                     st.session_state.plan[:11000] + "\nCHANGE REQUEST:\n" +
                     chosen_refinement + "\nReturn a complete revised day-by-day plan. "
                     "All prices are unverified planning estimates.",
-                    PlanningAssistant(), max_tokens=2600,
+                    PlanningAssistant(), max_tokens=6500,
                 )
-            if revised:
+            if complete_itinerary(revised, trip):
                 st.session_state.plan = revised
                 st.session_state.last_model = revised_model
                 st.session_state.approved_plan = False
@@ -1047,14 +1115,9 @@ with tab_plan:
 
                 with st.spinner("Trying available AI models..."):
 
-                    answer, model = ask_ai(
-                        "Create a fresh detailed travel plan:\n"
-                        + trip_summary(trip),
-                        PlanningAssistant(),
-                        max_tokens=2300,
-                    )
+                    answer, model = create_itinerary(trip)
 
-                if answer:
+                if complete_itinerary(answer, trip):
                     st.session_state.plan = answer
                     st.session_state.last_model = model
                     st.session_state.approved_plan = False
@@ -1271,7 +1334,7 @@ TRAVEL DETAILS:
 {context}
 
 CURRENT ITINERARY:
-{st.session_state.plan[:6000]}
+{(st.session_state.plan or "")[:6000]}
 
 CONVERSATION:
 {history}
